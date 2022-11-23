@@ -24,7 +24,7 @@ services:
         GIT_COMMIT: *STACKS_BLOCKCHAIN_COMMIT
     volumes:
       - ./bitcoin.conf:/root/.bitcoin/bitcoin.conf
-      - ./stacks-krypton-miner.toml/:/root/config.toml.in
+      - ./stacks-krypton-miner--init.toml/:/root/config.toml.in
       - ./init-data:/init-data
       - chainstate:/chainstate
     environment:
