@@ -1,0 +1,12 @@
+FROM node:16
+
+WORKDIR /node-part
+
+COPY node-part/package.json /node-part
+COPY node-part/step_0_miner.js /node-part
+COPY node-part/hyperchains.clar /node-part
+COPY node-part/trait-standards.clar /node-part
+
+RUN npm install
+
+CMD [ "node", "step_0_miner.js" ]

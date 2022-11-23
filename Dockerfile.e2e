@@ -1,0 +1,164 @@
+# syntax=docker/dockerfile:1
+
+FROM rust:bullseye as builder
+
+ARG GIT_COMMIT=3c6e4eb2e30dedd018085fc7ff3b340bd7dfcb2f
+ARG TARGETPLATFORM
+ENV DEBIAN_FRONTEND noninteractive
+
+WORKDIR /stacks
+
+COPY *stacks-blockchain-binaries /stacks-blockchain-binaries
+
+SHELL ["/bin/bash", "-ce"]
+RUN <<EOF
+  STACKS_NODE_BIN_ARM64=/stacks-blockchain-binaries/aarch64-unknown-linux-gnu/stacks-node
+  STACKS_NODE_BIN_AMD64=/stacks-blockchain-binaries/x86_64-unknown-linux-gnu/stacks-node
+  if [ "$TARGETPLATFORM" = "linux/arm64" ] && [ -f "$STACKS_NODE_BIN_ARM64" ]; then
+    echo "Using existing stacks-node binary: $STACKS_NODE_BIN_ARM64"
+    mkdir -p target/release && mv "$STACKS_NODE_BIN_ARM64" target/release/stacks-node
+    exit 0
+  elif [ "$TARGETPLATFORM" = "linux/amd64" ] && [ -f "$STACKS_NODE_BIN_AMD64" ]; then
+    echo "Using existing stacks-node binary: $STACKS_NODE_BIN_AMD64"
+    mkdir -p target/release && mv "$STACKS_NODE_BIN_AMD64" target/release/stacks-node
+    exit 0
+  fi
+  echo "Building stacks-node from commit: https://github.com/stacks-network/stacks-blockchain/commit/$GIT_COMMIT"
+  git init
+  git remote add origin https://github.com/stacks-network/stacks-blockchain.git
+  git -c protocol.version=2 fetch --depth=1 origin "$GIT_COMMIT"
+  git reset --hard FETCH_HEAD
+  CARGO_NET_GIT_FETCH_WITH_CLI=true cargo build --package stacks-node --bin stacks-node --release
+EOF
+
+FROM debian:bullseye-backports
+
+COPY --from=builder /stacks/target/release/stacks-node /usr/local/bin/
+COPY --from=ruimarinho/bitcoin-core:0.21.1 /opt/bitcoin-*/bin /usr/local/bin
+
+ENV DEBIAN_FRONTEND noninteractive
+RUN apt-get update && apt-get install -y curl/bullseye-backports gettext-base jq
+RUN apt-get clean && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
+
+VOLUME /chainstate
+
+# Stacks-node RPC
+EXPOSE 20443
+# Bitcoind JSON-RPC
+EXPOSE 18443
+# Postgres
+EXPOSE 5490
+
+ENV DATA_DIR=/chainstate/stacks-blockchain-data
+ENV BTC_ADDR=miEJtNKa3ASpA19v5ZhvbKTEieYjLpzCYT
+ENV MINER_SEED=9e446f6b0c6a96cf2190e54bcd5a8569c3e386f091605499464389b8d4e0bfc201
+ENV BITCOIN_PEER_HOST=localhost
+ENV BITCOIN_PEER_PORT=18444
+ENV BITCOIN_RPC_PORT=18443
+ENV BITCOIN_RPC_USER=btc
+ENV BITCOIN_RPC_PASS=btc
+
+ARG MINE_INTERVAL=5s
+ENV MINE_INTERVAL=$MINE_INTERVAL
+
+ARG STACKS_21_HEIGHT=103
+ENV STACKS_21_HEIGHT=$STACKS_21_HEIGHT
+
+ARG STACKS_POX2_HEIGHT=104
+ENV STACKS_POX2_HEIGHT=$STACKS_POX2_HEIGHT
+
+# priv: 6ad9cadb42d4edbfbe0c5bfb3b8a4125ddced021c4174f829b714ccbf527f02001
+# ARG REWARD_RECIPIENT=STQM73RQC4EX0A07KWG1J5ECZJYBZS4SJ4ERC6WN
+ARG REWARD_RECIPIENT
+ENV REWARD_RECIPIENT=$REWARD_RECIPIENT
+
+COPY ./bitcoin.conf /root/.bitcoin/bitcoin.conf
+COPY ./stacks-krypton-miner.toml /root/config.toml.in
+
+WORKDIR /root
+
+# Bootstrap chainstates
+SHELL ["/bin/bash", "-ce"]
+RUN <<EOF
+  if [[ ! -z "${REWARD_RECIPIENT}" ]]; then
+    export REWARD_RECIPIENT_CONF="block_reward_recipient = \"$REWARD_RECIPIENT\""
+  fi
+
+  mkdir -p /chainstate/bitcoin-data
+  bitcoind &
+  BTCD_PID=$!
+  bitcoin-cli -rpcwait getmininginfo
+  bitcoin-cli createwallet ""
+  bitcoin-cli importaddress $BTC_ADDR "" false
+  bitcoin-cli generatetoaddress 101 $BTC_ADDR
+
+  mkdir -p /chainstate/stacks-blockchain-data
+  envsubst < config.toml.in > config.toml
+  stacks-node start --config=config.toml &
+  STACKS_PID=$!
+
+  while true; do
+    HEIGHT=$(curl -s localhost:20443/v2/info | jq '.burn_block_height')
+    if [ "$HEIGHT" = "101" ]; then
+      echo "Stacks node caught up to block 101"
+      break
+    fi
+    sleep 0.5s
+  done
+
+  kill $STACKS_PID
+  wait $STACKS_PID
+
+  bitcoin-cli stop
+  wait $BTCD_PID
+EOF
+
+# Create run script
+RUN <<EOF
+cat > run.sh <<'EOM'
+#!/bin/bash -e
+  if [[ ! -z "${REWARD_RECIPIENT}" ]]; then
+    export REWARD_RECIPIENT_CONF="block_reward_recipient = \"$REWARD_RECIPIENT\""
+  fi
+
+  bitcoind &
+  BTCD_PID=$!
+
+  bitcoin-cli -rpcwait getmininginfo
+
+  envsubst < config.toml.in > config.toml
+  stacks-node start --config=config.toml &
+  STACKS_PID=$!
+
+  function start_miner() {
+    bitcoin-cli -rpcwait generatetoaddress 1 $BTC_ADDR
+    while true; do
+      TX=$(bitcoin-cli listtransactions '*' 1 0 true)
+      CONFS=$(echo "$TX" | jq '.[].confirmations')
+      if [ "$CONFS" = "0" ]; then
+        echo "Detected Stacks mining mempool tx, mining btc block..."
+        bitcoin-cli generatetoaddress 1 $BTC_ADDR
+      fi
+      sleep $MINE_INTERVAL
+    done
+  }
+  start_miner &
+
+  function cleanup() {
+    echo "Exiting, signal: $1"
+    kill $STACKS_PID 2>/dev/null && echo "Stacks exiting.."
+    wait $STACKS_PID 2>/dev/null && echo "Stacks exited"
+    kill $BTCD_PID 2>/dev/null && echo "Bitcoind exiting.."
+    wait $BTCD_PID 2>/dev/null && echo "Bitcoind exited"
+  }
+  trap "cleanup SIGTERM" SIGTERM
+  trap "cleanup SIGINT" SIGINT
+  trap "cleanup SIGHUP" SIGHUP
+  trap "cleanup EXIT" EXIT
+
+  wait
+EOM
+chmod +x run.sh
+EOF
+
+CMD ["/root/run.sh"]

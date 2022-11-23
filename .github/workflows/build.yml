@@ -1,0 +1,202 @@
+name: build
+
+on:
+  push:
+
+env:
+  STACKS_BLOCKCHAIN_COMMIT: 3c6e4eb2e30dedd018085fc7ff3b340bd7dfcb2f
+
+jobs:
+  cancel-previous-runs:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Cancel Previous Runs
+        uses: styfle/cancel-workflow-action@0.10.0
+        with:
+          access_token: ${{ github.token }}
+
+  build-stacks-node:
+    runs-on: ubuntu-20.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+      - name: Cache stacks-node
+        id: cache
+        uses: actions/cache@v3
+        with:
+          path: bin
+          key: cache-stacks-node-${{ env.STACKS_BLOCKCHAIN_COMMIT }}
+      - name: Install Rust - linux/amd64
+        if: steps.cache.outputs.cache-hit != 'true'
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          target: x86_64-unknown-linux-gnu
+      - name: Install Rust - linux/arm64
+        if: steps.cache.outputs.cache-hit != 'true'
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          target: aarch64-unknown-linux-gnu
+      - name: Install compilation tooling
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y g++-aarch64-linux-gnu libc6-dev-arm64-cross gcc-aarch64-linux-gnu
+      - name: Fetch Stacks node repo
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: |
+          echo "$PWD"
+          mkdir stacks-blockchain-repo && cd stacks-blockchain-repo
+          git init
+          git remote add origin https://github.com/stacks-network/stacks-blockchain.git
+          git -c protocol.version=2 fetch --depth=1 origin $STACKS_BLOCKCHAIN_COMMIT
+          git reset --hard FETCH_HEAD
+      - name: Rust cache
+        if: steps.cache.outputs.cache-hit != 'true'
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "stacks-blockchain-repo"
+          shared-key: rust-cache-stacks-node-${{ env.STACKS_BLOCKCHAIN_COMMIT }}
+      - name: Cargo fetch
+        if: steps.cache.outputs.cache-hit != 'true'
+        working-directory: stacks-blockchain-repo
+        run: |
+          cargo fetch --manifest-path testnet/stacks-node/Cargo.toml --target x86_64-unknown-linux-gnu --target aarch64-unknown-linux-gnu
+      - name: Build Stacks node
+        if: steps.cache.outputs.cache-hit != 'true'
+        working-directory: stacks-blockchain-repo
+        env:
+          CARGO_NET_GIT_FETCH_WITH_CLI: true
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+          CC_aarch64_unknown_linux_gnu: aarch64-linux-gnu-gcc
+          CXX_aarch64_unknown_linux_gnu: aarch64-linux-gnu-g++
+          AR_aarch64_unknown_linux_gnu: aarch64-linux-gnu-ar
+        run: |
+          cargo build --package stacks-node --bin stacks-node --release --target x86_64-unknown-linux-gnu --target aarch64-unknown-linux-gnu
+          mkdir -p ../bin/x86_64-unknown-linux-gnu ../bin/aarch64-unknown-linux-gnu
+          cp target/x86_64-unknown-linux-gnu/release/stacks-node ../bin/x86_64-unknown-linux-gnu
+          cp target/aarch64-unknown-linux-gnu/release/stacks-node ../bin/aarch64-unknown-linux-gnu
+      - uses: actions/upload-artifact@v3
+        with:
+          name: stacks-node-bin
+          if-no-files-found: error
+          path: |
+            bin/*/stacks-node
+
+  build-push-docker:
+    needs: build-stacks-node
+    runs-on: ubuntu-20.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+      - uses: actions/download-artifact@v3
+        with:
+          name: stacks-node-bin
+          path: stacks-blockchain-binaries
+      - name: Process of downloaded artifacts
+        working-directory: stacks-blockchain-binaries
+        run: |
+          ls -R
+          chmod +x x86_64-unknown-linux-gnu/stacks-node
+          chmod +x aarch64-unknown-linux-gnu/stacks-node
+      - name: Docker meta
+        id: meta
+        uses: docker/metadata-action@v4
+        with:
+          images: zone117x/stacks-api-e2e
+          tags: |
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=raw,value=stacks2.1,enable={{is_default_branch}}
+            type=raw,value=stacks2.1-{{branch}}-{{sha}}
+            type=ref,event=branch,prefix=stacks2.1-
+            type=ref,event=pr,prefix=stacks2.1-
+            type=semver,pattern={{version}},prefix=stacks2.1-
+            type=semver,pattern={{major}}.{{minor}},prefix=stacks2.1-
+            type=sha,prefix=stacks2.1-
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v2
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v2
+        with:
+          config-inline: |
+            [worker.oci]
+              max-parallelism = 1
+      - name: Login to DockerHub
+        uses: docker/login-action@v2
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+      - name: Build Docker images
+        uses: docker/build-push-action@v3
+        with:
+          file: Dockerfile.e2e
+          context: .
+          push: true
+          platforms: linux/amd64,linux/arm64
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=registry,ref=zone117x/stacks-api-e2e:latest
+          cache-to: type=inline
+          build-args: |
+            STACKS_21_HEIGHT=3
+            STACKS_POX2_HEIGHT=4
+
+  build-push-stacks2_1-transition-docker:
+    needs: build-stacks-node
+    runs-on: ubuntu-20.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+      - uses: actions/download-artifact@v3
+        with:
+          name: stacks-node-bin
+          path: stacks-blockchain-binaries
+      - name: Process of downloaded artifacts
+        working-directory: stacks-blockchain-binaries
+        run: |
+          ls -R
+          chmod +x x86_64-unknown-linux-gnu/stacks-node
+          chmod +x aarch64-unknown-linux-gnu/stacks-node
+      - name: Docker meta
+        id: meta
+        uses: docker/metadata-action@v4
+        with:
+          images: zone117x/stacks-api-e2e
+          flavor: |
+            latest=false
+          tags: |
+            type=raw,value=stacks2.1-transition,enable={{is_default_branch}}
+            type=raw,value=stacks2.1-transition-{{branch}}-{{sha}}
+            type=ref,event=branch,prefix=stacks2.1-transition-
+            type=ref,event=pr,prefix=stacks2.1-transition-
+            type=semver,pattern={{version}},prefix=stacks2.1-transition-
+            type=semver,pattern={{major}}.{{minor}},prefix=stacks2.1-transition-
+            type=sha,prefix=stacks2.1-transition-
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v2
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v2
+        with:
+          config-inline: |
+            [worker.oci]
+              max-parallelism = 1
+      - name: Login to DockerHub
+        uses: docker/login-action@v2
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+      - name: Build Docker images
+        uses: docker/build-push-action@v3
+        with:
+          file: Dockerfile.e2e
+          context: .
+          push: true
+          platforms: linux/amd64,linux/arm64
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=registry,ref=zone117x/stacks-api-e2e:stacks2.1-transition
+          cache-to: type=inline
+          build-args: |
+            STACKS_21_HEIGHT=120
+            STACKS_POX2_HEIGHT=136
