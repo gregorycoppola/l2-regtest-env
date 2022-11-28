@@ -31,7 +31,7 @@ async function publishContract(senderKey, contractName, contractFilename, networ
 }
 
 /// Wait for the stacks height to be positive.
-async function waitForStacksHeight(network_url) {
+async function waitForStacksHeight(network_url, stacks_height) {
   console.log(`waiting for: ${network_url} to make a first block`)
   const query = `${network_url}/v2/info`
   while (true) {
@@ -40,7 +40,8 @@ async function waitForStacksHeight(network_url) {
       const result = await axios.get(query)
       const stacks_tip_height = result.data.stacks_tip_height
     
-      if (stacks_tip_height > 0) {
+      console.log(`current stacks height is ${stacks_tip_height}`)
+      if (stacks_tip_height > stacks_height) {
         console.log(`found: the ${network_url} to make a first block`)
         return
       }
@@ -55,7 +56,7 @@ async function waitForStacksHeight(network_url) {
 }
 
 async function main() {
-  await waitForStacksHeight(L1_URL)
+  await waitForStacksHeight(L1_URL, 110)
   const minerPublish0id = await publishContract(PK_MINER, 'trait-standards', 'trait-standards.clar', L1_URL, 0)
   const minerPublish1id = await publishContract(PK_MINER, 'hc-alpha', 'hyperchains.clar', L1_URL, 1)
   console.log({minerPublish0id, minerPublish1id})
