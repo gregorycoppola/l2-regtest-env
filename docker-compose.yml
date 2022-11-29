@@ -171,7 +171,7 @@ services:
       context: .
       dockerfile: Dockerfile.stacks-node
       args:
-        GIT_COMMIT: *STACKS_BLOCKCHAIN_COMMIT
+        GIT_COMMIT: a1ceee540c995b291fd8ff9958816f88086429de
     depends_on:
       - bitcoind
     ports:
