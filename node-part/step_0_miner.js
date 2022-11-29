@@ -56,7 +56,7 @@ async function waitForStacksHeight(network_url, stacks_height) {
 }
 
 async function main() {
-  await waitForStacksHeight(L1_URL, 110)
+  await waitForStacksHeight(L1_URL, 20)
   const minerPublish0id = await publishContract(PK_MINER, 'trait-standards', 'trait-standards.clar', L1_URL, 0)
   const minerPublish1id = await publishContract(PK_MINER, 'hc-alpha', 'hyperchains.clar', L1_URL, 1)
   console.log({minerPublish0id, minerPublish1id})
