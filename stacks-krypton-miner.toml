@@ -2,7 +2,7 @@
 name = "krypton-node"
 rpc_bind = "0.0.0.0:20443"
 p2p_bind = "0.0.0.0:20444"
-working_dir = "$DATA_DIR"
+# working_dir = "$DATA_DIR"
 
 seed = "$MINER_SEED"
 local_peer_seed = "$MINER_SEED"
@@ -57,15 +57,15 @@ start_height = 0
 
 [[burnchain.epochs]]
 epoch_name = "2.0"
-start_height = 1
+start_height = 10
 
 [[burnchain.epochs]]
 epoch_name = "2.05"
-start_height = 2
+start_height = 20
 
 [[burnchain.epochs]]
 epoch_name = "2.1"
-start_height = 103
+start_height = 30
 
 [[ustx_balance]]
 address = "STB44HYPYAT2BB2QE513NSP81HTMYWBJP02HPGK6"
